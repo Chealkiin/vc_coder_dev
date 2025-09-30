@@ -23,7 +23,7 @@ class ModelVersion:
 class BaseContract(BaseModel):
     """Base class for all contract models."""
 
-    model_config = ConfigDict(extra="forbid", frozen=False, ser_json_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", frozen=False, ser_json_inf_nan='null')
 
     schema_version: str = Field(default="")
     schema_id: str = Field(default="")
