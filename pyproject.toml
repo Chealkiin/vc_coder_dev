@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-service"
+version = "0.1.0"
+description = "Production-grade agent orchestration service stubs"
+authors = [{ name = "Agent Team", email = "team@example.com" }]
+requires-python = ">=3.11"
+dependencies = [
+    "SQLAlchemy>=2.0.0,<3.0.0",
+    "psycopg[binary]>=3.1.0,<4.0.0",
+    "alembic>=1.12.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0.0",
+    "isort>=5.12.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+    "pytest>=7.4.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+include = "\\.pyi?$"
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["backend"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "N", "W", "B", "UP"]
+ignore = []
+exclude = ["backend/core/store/migrations"]
+
+[tool.ruff.isort]
+known-first-party = ["backend"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_no_return = true
+strict_optional = true
+follow_imports = "silent"
+disallow_untyped_defs = true
+disallow_any_unimported = true
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+show_error_codes = true
+
+[tool.mypy."backend.*"]
+strict = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = ["backend/tests"]
