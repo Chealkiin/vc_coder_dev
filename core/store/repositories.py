@@ -15,9 +15,11 @@ class RunRepo(ABC):
     @abstractmethod
     def create_run(
         self,
+        *,
         repo: str,
         base_ref: str,
-        steps: Sequence[Mapping[str, object]],
+        feature_ref: str,
+        status: "RunState",
         config: Mapping[str, object] | None = None,
     ) -> str:
         """Create a run and return its identifier."""
@@ -35,31 +37,42 @@ class StepRepo(ABC):
     """Persistence abstraction for step level metadata."""
 
     @abstractmethod
-    def create_steps(self, run_id: str, steps: Sequence[Mapping[str, object]]) -> None:
-        """Persist the initial step descriptors for a run."""
-
-    @abstractmethod
-    def get_step(self, run_id: str, index: int) -> Mapping[str, object] | None:
-        """Return the stored representation of the step."""
-
-    @abstractmethod
-    def update_step_state(self, run_id: str, index: int, state: "StepState") -> None:
-        """Persist the latest state for the step."""
+    def create_steps(self, run_id: str, steps: Sequence[Mapping[str, object]]) -> Sequence[Mapping[str, object]]:
+        """Persist the initial step descriptors for a run and return stored records."""
 
     @abstractmethod
     def list_steps(self, run_id: str) -> Sequence[Mapping[str, object]]:
         """List all steps for a run preserving execution order."""
+
+    @abstractmethod
+    def update_step_state(self, run_id: str, step_id: str, state: "StepState") -> None:
+        """Persist the latest state for the step."""
+
+    @abstractmethod
+    def update_step_metadata(
+        self,
+        run_id: str,
+        step_id: str,
+        *,
+        plan: Mapping[str, object] | None = None,
+        work_order: Mapping[str, object] | None = None,
+        coder_result: Mapping[str, object] | None = None,
+    ) -> None:
+        """Persist supplemental metadata for the step."""
 
 
 class ArtifactRepo(ABC):
     """Persistence abstraction for artifacts emitted during a run."""
 
     @abstractmethod
-    def record_artifact(
+    def add(
         self,
+        *,
         run_id: str,
         step_id: str,
-        artifact: Mapping[str, object],
+        kind: str,
+        content: str,
+        meta: Mapping[str, object] | None = None,
     ) -> None:
         """Persist an artifact produced by a step."""
 
@@ -68,8 +81,9 @@ class ValidationReportRepo(ABC):
     """Persistence abstraction for validation reports."""
 
     @abstractmethod
-    def record_report(
+    def add(
         self,
+        *,
         run_id: str,
         step_id: str,
         report: Mapping[str, object],
@@ -81,6 +95,10 @@ class PRBindingRepo(ABC):
     """Persistence abstraction for PR related metadata."""
 
     @abstractmethod
-    def upsert_binding(self, run_id: str, metadata: Mapping[str, object]) -> None:
+    def get(self, run_id: str) -> Mapping[str, object] | None:
+        """Return the PR binding metadata for a run if present."""
+
+    @abstractmethod
+    def upsert(self, run_id: str, metadata: Mapping[str, object]) -> None:
         """Persist PR binding metadata for a run."""
 

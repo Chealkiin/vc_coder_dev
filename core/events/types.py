@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
-from typing import Mapping, Optional
+from typing import Mapping
 
 
 class LifecycleEventType(str, Enum):
@@ -28,15 +28,31 @@ class LifecycleEvent:
     state: str
     timestamp: datetime
     event_type: LifecycleEventType
-    step_id: Optional[str] = None
-    duration: Optional[timedelta] = None
-    meta: Optional[Mapping[str, object]] = None
+    step_id: str | None = None
+    duration_ms: int | None = None
+    meta: Mapping[str, object] | None = None
 
     @property
     def type(self) -> LifecycleEventType:
         """Expose the canonical event type."""
 
         return self.event_type
+
+    def to_dict(self) -> Mapping[str, object]:
+        """Return a serialisable mapping representation."""
+
+        payload: dict[str, object] = {
+            "run_id": self.run_id,
+            "step_id": self.step_id,
+            "state": self.state,
+            "timestamp": self.timestamp.isoformat(),
+            "event_type": self.event_type.value,
+        }
+        if self.duration_ms is not None:
+            payload["duration_ms"] = self.duration_ms
+        if self.meta is not None:
+            payload["meta"] = dict(self.meta)
+        return payload
 
 
 @dataclass(frozen=True)
