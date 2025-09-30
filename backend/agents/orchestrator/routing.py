@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Protocol, runtime_checkable
+from typing import Mapping, Protocol, Sequence, runtime_checkable
 
 
 class WorkOrderPayload(Protocol):
@@ -47,6 +47,8 @@ class PlannerAdapter(Protocol):
 class SubPlannerAdapter(Protocol):
     """Adapter responsible for turning planner output into a concrete work order."""
 
+    transform_log: Sequence[str]
+
     def build_work_order(self, step: Mapping[str, object]) -> WorkOrderPayload:
         """Return a canonical :class:`~core.contracts.WorkOrder` for the provided ``step``."""
 
@@ -54,6 +56,11 @@ class SubPlannerAdapter(Protocol):
 @runtime_checkable
 class CoderAdapter(Protocol):
     """Adapter that executes the work order and returns coder output."""
+
+    def build_coder_prompt(
+        self, work_order: WorkOrderPayload, repo_meta: Mapping[str, object] | None = None
+    ) -> str:
+        """Return the deterministic coder prompt for ``work_order``."""
 
     def execute(self, work_order: WorkOrderPayload) -> CoderResultPayload:
         """Execute ``work_order`` and return the resulting diff and notes."""

@@ -15,7 +15,7 @@ from .version import DEFAULT_VERSION
 class Issue(BaseModel):
     """Validation issue description."""
 
-    model_config = ConfigDict(extra="forbid", frozen=False, ser_json_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", frozen=False, ser_json_inf_nan='null')
 
     code: str
     file: Optional[str] = None
