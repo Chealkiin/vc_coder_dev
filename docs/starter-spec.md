@@ -1,22 +1,49 @@
-# Agent Group Standards & Starter Spec (v0-min)
 
-**Purpose:** keep the repo clean, consistent, and resilient while we bootstrap an agent group that (for now) runs tasks *sequentially* via GitHub and GPT-5-Codex. This is the single living doc we’ll expand over time.
+# Agent Group Standards & Starter Spec (v0–prod)
 
----
-
-## 1) Guiding Principles
-- **Clarity over cleverness.** Prefer boring, readable solutions.
-- **Small surface, explicit contracts.** Every agent input/output is a typed object.
-- **Deterministic steps.** Each step is idempotent; re-running a step never double-commits.
-- **PR-only safety.** No direct pushes to default. All changes via PR with checks.
-- **Tight prompts, tight diffs.** Sub-planners must constrain coder scope; avoid repo-wide edits.
-- **No drift.** Conventions are enforced by tooling. Failing checks block merges.
+**Purpose**: One living document that keeps the repo clean, consistent, and production‑grade while we bootstrap an agent group that executes *sequential* tasks against GitHub using GPT‑5 (planning) and GPT‑5‑Codex (coding). Postgres from day one. Clean, modular, dependency‑injected.
 
 ---
 
-## 2) Repository & Project Standards
+## 1) Architecture at a glance
 
-### 2.1 Repo Layout (service-first; adapt as we grow)
+```
+[Vercel Chat UI/CLI]
+        │
+        ▼
+  [Gateway/API] ──────► [Orchestrator] ── state machine (per step)
+                           │   │   │
+       ┌───────────────────┘   │   └──────────────────────────┐
+       ▼                       ▼                              ▼
+ [Planner (GPT‑5)]     [Sub‑Planner (GPT‑5)]           [Coder (GPT‑5‑Codex)]
+   - normalize             - produce WorkOrder              - return unified diff
+   - (future) enrich       - scope & constraints            - no deps unless allowed
+
+       ▼                       ▼                              ▼
+                 [Validator hooks] ── fatal/warn surface
+                           │
+                           ▼
+                    [GitHub Integrator]
+                     - branch/commit/PR
+                     - status comments
+                     - (manual merge by default)
+
+       ▼
+                [Postgres] (runs, steps, artifacts,
+                 validation_reports, pr_bindings, events)
+```
+
+### 1.1 Core patterns we are carrying over
+- **BaseAgent + LifecycleMixin + LoggingMixin**: prepare → build → execute → postprocess with consistent metadata and error handling.
+- **Contracts + Registry**: strict Pydantic v2 models, versioned, with normalization transforms defined per contract and logged as artifacts.
+- **Output Handler pipeline**: validates & routes normalized results (esp. `unified-diff`) and records metrics/artifacts.
+- **Dependency Injection (DI)**: agents receive dependencies (store, github, memory, logger, config) via constructors; registries are *read‑only metadata*, not service locators.
+
+---
+
+## 2) Repository & project standards
+
+### 2.1 Layout
 ```
 backend/
   agents/
@@ -26,13 +53,14 @@ backend/
     coder/
     github/
     validator/
+    shared/               # base_agent, lifecycle_mixin, logging_mixin, errors
   core/
-    contracts/        # JSON/Type/Schema definitions
-    events/
-    models/           # Run, Step, Artifact, ValidationReport
-    store/            # SQLite/PG adapters
+    contracts/            # pydantic models + registry + mapping tables
+    events/               # types and helpers
+    models/               # SQLAlchemy models
+    store/                # Postgres repositories + session mgmt
   api/
-    server.py         # minimal HTTP API (POST /runs etc.)
+    server.py             # minimal HTTP API (POST /runs etc.)
   tools/
     codex_client.py
     github_client.py
@@ -42,256 +70,202 @@ backend/
 README.md
 ```
 
-### 2.2 Languages & Tooling
-- **Python (backend/agents)**  
-  - Formatting: `black`, imports: `isort`, lint: `ruff`, types: `mypy --strict`.
-  - Docstrings: Google-style. Type annotate all public functions.
-  - Logging: structured (JSON). No print() in production paths.
-  - Exceptions: raise specific errors; never swallow without logging context.
-- **TypeScript (UI or Vercel bridge when added)**  
-  - `tsconfig` strict true. ESLint + Prettier. Runtime validation with Zod.
-  - Avoid `any`. Use discriminated unions for agent message types.
+### 2.2 Languages & tooling
+- **Python (backend)**: `black`, `isort`, `ruff`, `mypy --strict`, SQLAlchemy 2.x, Psycopg 3, Alembic.
+- **TypeScript (UI/bridge later)**: `strict`, ESLint, Prettier, Zod for runtime validation.
+- All public functions **typed**; docstrings **Google style**.
+- No `print()` in prod paths. Structured JSON logs only.
 
-### 2.3 Naming Conventions
-- **Files/dirs:** `snake_case` for Python, `kebab-case` for TS/JS files.
-- **Classes:** `PascalCase`. **Functions/vars:** `snake_case` (py), `camelCase` (ts).
-- **Branches:** `feat/<short-topic>-<ticket|date>`, `fix/...`, `chore/...`.
-- **Commits:** Conventional Commits (`feat: ...`, `fix: ...`, `docs: ...`). One logical change per commit.
+### 2.3 Naming
+- Files/dirs: `snake_case` (py), `kebab-case` (ts files).
+- Classes: `PascalCase`. Functions/vars: `snake_case` (py), `camelCase` (ts).
+- Branches: `feat/<topic>-<id>`, `fix/...`, `chore/...`.
+- Commits: **Conventional Commits**; one logical change per commit.
 
 ### 2.4 Comments & TODOs
-- Explain *why*, not *what*. Keep comments close to non-obvious code.
-- `# TODO(username, date): ...` and link issue/ticket if applicable.
-- Prohibit long commented-out blocks; delete dead code.
-
-### 2.5 Tests & Quality Gates
-- **Unit first.** Minimum coverage gate 70% (raise later).
-- Lint + typecheck must pass. Run quick language linters on only changed files if needed.
-- Validator emits a **fatal-only** summary for gating (see §6).
-
-### 2.6 Secrets & Config
-- No secrets in code or logs. Use env vars + local .env (gitignored).
-- Redact sensitive tokens in agent logs and PR comments.
+- Explain **why**, not what. `# TODO(name, YYYY‑MM‑DD): ...` with link.
 
 ---
 
-## 3) AI Prompt & Message Standards
+## 3) Contracts & registries (production rules)
 
-### 3.1 General
-- Prompts from agents must be **deterministic templates** with explicit fields. Avoid free-form chatter.
-- For multi-line or complex prompts sent to tools, prefer **codebox blocks** where required by the target UI. Avoid triple backticks inside the **prompt text itself** when that breaks the consumer.
+- **Pydantic v2**, `extra="forbid"`, `model_config` includes version & schema id.
+- **Normalization transforms** are defined per contract (e.g., `depends_on → dependencies`) and are **logged** into an artifact alongside the final payload.
+- **Registry** discovers contract classes (decorators or explicit table), caches them at startup; no runtime scanning loops.
+- **Mapping table**: `step_type → output_type` with aliases as data. Single source of truth.
 
-### 3.2 Canonical Step Message (Planner → Sub-planner → Coder)
+### 3.1 Canonical WorkOrder (Sub‑planner → Coder)
 ```json
 {
-  "step_id": "run-123.step-02",
-  "repo": "org/repo",
-  "base_ref": "main",
-  "branch_ref": "feature/run-123",
-  "title": "Implement Settings page scaffold",
-  "objective": "Add /settings route with nav placeholders",
-  "constraints": [
-    "Scope limited to /settings, no global refactors",
-    "Return a unified diff (diff --git) with correct paths"
-  ],
-  "acceptance_criteria": [
-    "Route exists and loads",
-    "Nav shows Profile/Billing/Teams/Danger Zone",
-    "Build passes validators"
-  ],
-  "context_files": ["README.md", "frontend/src/app/router.tsx"],
-  "return_format": "unified-diff"
-}
-```
-
-### 3.3 Diff Expectations
-- Prefer `diff --git` unified diffs. If the tool returns files, include absolute repo-relative paths. No ambiguous patches.
-
----
-
-## 4) Minimal Agent Roles (v0)
-
-### 4.1 Orchestrator
-- Accepts a **sequence** of tasks.
-- Manages run state, step queue, pause/resume/retry.
-- Publishes step lifecycle events: `planned`, `executing`, `validated`, `committed`, `merged`, `failed`.
-
-### 4.2 Planner (GPT‑5)
-- v0: pass-through to sub-planner with minimal normalization.
-- Future: take prompt/high level plan and turn into full design and development plan; make executive decisions when underspecified; call doc/analysis tools to generate plans; various other tools.
-
-### 4.3 Sub‑Planner (GPT‑5)
-- Expand each step into a constrained work order:
-  - objective, acceptance_criteria, constraints, impacted files, return_format.
-- Sequence the steps correctly (may be identical to input order in v0).
-
-### 4.4 Coder (GPT‑5‑Codex)
-- Execute the work order strictly within constraints.
-- Return unified diff plus brief notes.
-- Avoid creating new dependencies unless explicitly allowed.
-
-### 4.5 GitHub Integrator
-- Create branch from base if absent; apply patch; commit; open/update PR.
-- Status check summary comment including validator results.
-- Merge policy: **manual merge by default** (auto-merge later).
-
-### 4.6 Validator (hook)
-- Run fast checks (linters, syntax, minimal tests) on changed files.
-- Emit `ValidationReport` with `fatal` and `warnings` aligned to a shared schema.
-
----
-
-## 5) Contracts (v0)
-
-### 5.1 Work Order (Sub‑planner → Coder)
-```json
-{
-  "work_order_id": "run-123.step-02",
+  "work_order_id": "uuid",
   "title": "Implement Settings route",
   "objective": "Create /settings with nav placeholders",
   "constraints": ["no global refactors", "return unified diff"],
-  "acceptance_criteria": [
-    "Route exists",
-    "Nav items present",
-    "Validators pass"
-  ],
-  "context_files": ["README.md", "frontend/src/app/router.tsx"],
+  "acceptance_criteria": ["route exists","nav items present","validators pass"],
+  "context_files": ["README.md","frontend/src/app/router.tsx"],
   "return_format": "unified-diff"
 }
 ```
 
-### 5.2 Coder Result
+### 3.2 CoderResult
 ```json
-{
-  "work_order_id": "run-123.step-02",
-  "result": {
-    "diff": "diff --git a/...",
-    "notes": "Added route and placeholders"
-  }
-}
+{"work_order_id":"uuid","diff":"diff --git a/...","notes":"Added route and placeholders"}
 ```
 
-### 5.3 ValidationReport (fatal-only surface)
+### 3.3 ValidationReport (fatal surface)
 ```json
-{
-  "step_id": "run-123.step-02",
-  "fatal": [
-    {"code": "PY_SYNTAX", "file": "backend/api/server.py", "line": 42, "msg": "SyntaxError: ..."}
-  ],
-  "warnings": [
-    {"code": "STYLE_NAMING", "file": "frontend/src/app/router.tsx", "msg": "CamelCase component name expected"}
-  ],
-  "metrics": {"lint_errors": 0, "tests_run": 12, "tests_failed": 0}
-}
+{"step_id":"uuid","fatal":[{"code":"PY_SYNTAX","file":"...","line":42,"msg":"..."}],
+ "warnings":[{"code":"STYLE_NAMING","file":"...","msg":"..."}],
+ "metrics":{"lint_errors":0,"tests_run":12,"tests_failed":0}}
 ```
 
 ---
 
-## 6) Step Execution Outline (v0)
+## 4) Prompt & message standards
+- Agent prompts are **deterministic templates**; no free‑form chatter.
+- Coders must return **`diff --git` unified diffs**. If a tool returns files, they must be absolute repo‑relative paths (fallback path, discouraged).
+- Sub‑planner is the **scope police**: narrow impact, set constraints, forbid dependencies unless allowed.
 
-1. **Receive tasks** (CLI or basic GUI). Normalize to Steps.
-2. **For each step** in order:
-   1. Planner forwards to Sub‑planner to produce Work Order.
-   2. Coder (GPT‑5‑Codex) executes with repo context → returns diff.
-   3. Validator runs on changed files → produce ValidationReport.
-   4. If **fatal issues** → pause run (operator fixes or retry).
-   5. If pass → GitHub Integrator commits to `feature/<run>` and updates/creates PR.
-   6. Optionally merge PR (manual default) or keep updating the same PR per step.
-3. **Proceed** to next step after commit (and merge, if policy requires).
+---
 
-Pseudo‑control:
-```text
-for step in steps:
-  work = sub_planner.plan(step)
-  result = coder.execute(work)
-  report = validator.check(result.diff)
-  if report.fatal: pause_and_wait()
-  else:
-    commit_pr(result.diff)
-    maybe_merge()
-continue
+## 5) Execution pipeline (v0 sequence)
+
+**States**: `QUEUED → PLANNED → EXECUTING → VALIDATING → COMMITTING → PR_UPDATED → (MERGED|PAUSED|FAILED)`
+
+1. Orchestrator normalizes user steps.
+2. Planner (v0 pass‑through) → Sub‑planner creates a **WorkOrder**.
+3. Coder (GPT‑5‑Codex) returns **unified diff**.
+4. Validator runs on **changed files only**, produces **fatal/warn** surface.
+5. If fatal → **PAUSED**, record artifacts & recovery tip; else commit + update PR.
+6. Merge is **manual** by default; proceed to next step after commit (or merge, if enabled).
+
+**Diff size guard (configurable):**
+- Defaults: `max_changed_lines = 5000`, `max_new_files = 50`.  
+- Behavior: if exceeded → **PAUSED** with reason; operator may toggle off or raise limits and **retry**.
+- Feature flag: `SIZE_GUARDS_ENABLED=true|false` (off → proceed but still log metrics).
+
+---
+
+## 6) Validation & quality gates
+- Fast checks only in v0: Python (`ruff`, `mypy` on changed), JS/TS (`eslint`, `tsc` on changed).
+- Any **fatal** blocks progress (PAUSED). **Warnings** annotate PR and continue.
+- Future: **QualityAgent** for improvements (not a gatekeeper).
+
+---
+
+## 7) GitHub integrator
+- **GitHub App** (least privilege): contents read/write, pulls, optional checks.
+- Create branch from base if absent; `git apply` patch; commit; open/update PR.
+- Update PR body per step with summary + validator metrics.
+- Final merge: **manual** (toggle auto‑merge later).
+
+---
+
+## 8) Persistence (Postgres only)
+- Tables: `runs`, `steps`, `artifacts`, `validation_reports`, `pr_bindings`, `events`.
+- UUIDs for primary keys (except `events.id` bigserial). Strict FKs, unique `(run_id, idx)` on steps.
+- Alembic migrations committed with each schema change. No SQLite anywhere.
+
+**DDL (concise)**
+```sql
+create table runs (
+  id uuid primary key,
+  repo text not null,
+  base_ref text not null,
+  branch_ref text not null,
+  status text not null check (status in ('queued','running','paused','failed','completed')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table steps (
+  id uuid primary key,
+  run_id uuid not null references runs(id) on delete cascade,
+  idx int not null,
+  title text not null,
+  body text not null,
+  status text not null check (status in ('queued','planned','executing','validating','committing','pr_updated','merged','paused','failed')),
+  acceptance_criteria jsonb,
+  plan_md text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(run_id, idx)
+);
+create table artifacts (
+  id uuid primary key,
+  step_id uuid not null references steps(id) on delete cascade,
+  kind text not null check (kind in ('diff','doc','log','blob','rej')),
+  uri text not null,
+  meta jsonb default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+create table validation_reports (
+  id uuid primary key,
+  step_id uuid not null references steps(id) on delete cascade,
+  report jsonb not null,
+  fatal_count int not null default 0,
+  warnings_count int not null default 0,
+  created_at timestamptz not null default now()
+);
+create table pr_bindings (
+  run_id uuid primary key references runs(id) on delete cascade,
+  pr_number int not null,
+  pr_url text not null
+);
+create table events (
+  id bigserial primary key,
+  run_id uuid not null references runs(id) on delete cascade,
+  step_id uuid null references steps(id) on delete cascade,
+  type text not null,
+  payload jsonb not null default '{}'::jsonb,
+  ts timestamptz not null default now()
+);
 ```
 
 ---
 
-## 7) Coding Standards (Concrete Rules)
-
-### 7.1 Python
-- `black`, `isort`, `ruff` (CI-enforced). `mypy --strict` on agents/core.
-- Docstrings: Google style. Example:
-```
-def apply_patch(repo: Path, diff: str) -> None:
-    """Apply a unified diff to a git repo.
-
-    Args:
-        repo: Repository root path.
-        diff: Unified diff text (diff --git).
-    Raises:
-        PatchApplyError: If apply fails.
-    """
-```
-- Imports: stdlib, third-party, local — in that order; no wildcard imports.
-- Dependency hygiene: pin versions; prefer stdlib; avoid heavy libs unless justified.
-
-### 7.2 TypeScript
-- `strict` true; no `any`. ESLint/Prettier in CI.
-- Types for all HTTP contracts. Validate with Zod at runtime.
-- Avoid stateful singletons; favor explicit dependency injection in constructors.
-
-### 7.3 Logging
-- Structured JSON: `level`, `ts`, `run_id`, `step_id`, `agent`, `message`, `meta`.
-- No secrets; redact tokens and file contents where necessary.
-
-### 7.4 Error Handling
-- Raise/return typed errors with actionable messages.
-- Never catch-and-drop. Always include context (run_id, step_id, file).
-
-### 7.5 PR Template (v0)
-```
-## Summary
-<what/why>
-
-## Changes
-- ...
-
-## Validation
-- [ ] Lint/typecheck green
-- [ ] Unit tests pass
-- [ ] Acceptance criteria met
-
-## Notes
-<risk, follow-ups>
-```
+## 9) Logging & observability
+- **Stdlib JSON logging** only; fields: `ts`, `level`, `run_id`, `step_id`, `agent`, `phase`, `message`, `meta`.
+- Each lifecycle phase emits start/finish with durations.
+- Events also persisted to `events` table and streamed to UI.
+- Optional (future): OpenTelemetry spans/traces.
 
 ---
 
-## 8) Basic “What to Build First”
-1. **Core models & store**: Run, Step, Artifact, ValidationReport (SQLite).
-2. **Contracts**: WorkOrder, CoderResult, ValidationReport schemas.
-3. **GitHub integrator**: branch/create PR/apply patch (PAT ok for now).
-4. **Validator stub**: Python + JS quick linters; fatal-only surface.
-5. **Sub‑planner**: convert a Step → WorkOrder with strict constraints.
-6. **Coder adapter**: call GPT‑5‑Codex; enforce unified diff return.
-7. **Orchestrator**: sequential loop with pause/resume/retry.
-8. **CLI**: `runs start --repo org/repo --base main --steps file.steps`.
+## 10) Secrets & config (2025 best practice)
+- **Workload identity / OIDC** for CI to cloud (short‑lived tokens). No long‑lived PATs in CI.
+- **Managed secret stores** (cloud Secret Manager) or **Vault / 1Password Connect** for server workloads.
+- **KMS‑backed encryption** for config at rest; never commit secrets; enable secret scanning.
+- For Vercel: use **encrypted environment variables**, scoped per environment, rotation policy documented.
+- Redaction at logger boundary; never echo tokens in PRs or artifacts.
 
 ---
 
-## 9) Future Additions (brief)
-- **QualityAgent**: review diffs; fix TODOs/placeholders; harden code.
+## 11) Future features (design now, implement later)
+- **Context enrichment** (planner): memory/codegraph retrieval with retries, caching, token budget, and telemetry.
 - **DocsAgent**: PR descriptions, ADRs, changelog.
-- **Memory/Context**: vector summaries per step; retrieval for next steps.
-- **Concurrency**: multiple sub‑planners/coders with locks and blackboards.
+- **QualityAgent**: post‑diff hardening (TODOs/placeholders, tests), non‑blocking in v0.
+- **Concurrency**: multiple sub‑planners/coders with file locking/blackboards.
 
 ---
 
-## 10) Decision Log (placeholders to fill as we agree)
-- GitHub auth: PAT vs App → _TBD_
-- Merge policy: manual vs auto at end → _TBD_
-- DB: SQLite now, PG later → _TBD_
-- Validator minimum set → _TBD_
+## 12) Implementation order
+1) Postgres models, repositories, migrations.  
+2) Contracts package (Pydantic v2) + registry + mapping tables + transform logging.  
+3) BaseAgent + Lifecycle + Logging mixins (timeouts/retries/cancellation).  
+4) Output/Normalization pipeline (unified diff enforcement, artifacts).  
+5) GitHub integrator (App auth, PR body updater).  
+6) Sub‑planner (scope/constraints), Coder adapter (Codex API).  
+7) Orchestrator state machine + event stream (pause/resume/retry).  
+8) Validator hooks (changed‑files only).  
+9) Minimal CLI & gateway; CI with linters/types/tests.
 
 ---
 
-## 11) Observability
-- Emit lifecycle events per step. Persist logs and artifacts.
-- Attach run/step IDs to PR comments for traceability.
+## 13) Decision log (locked)
+- **DB**: Postgres only (no SQLite).  
+- **Auth**: GitHub App; manual merge default.  
+- **DI**: manual wiring + small factories (no hidden globals).  
+- **Contracts**: Pydantic v2, versioned, transforms logged.  
+- **Logging**: stdlib JSON; traces optional later.  
+- **Guards**: max 5000 changed lines / 50 new files; feature flag to disable.  
+- **Coders**: must return `diff --git` unified diffs.
