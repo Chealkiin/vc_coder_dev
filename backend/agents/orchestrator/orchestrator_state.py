@@ -38,7 +38,7 @@ class StepSnapshot:
 
     run_id: str
     index: int
-    name: str
+    step_id: str
     state: StepState
     created_at: datetime
     updated_at: datetime
